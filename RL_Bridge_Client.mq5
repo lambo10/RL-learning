@@ -12,7 +12,7 @@
 
 //--- Input parameters
 input group "--- Python Server Configuration ---"
-input string   InpServerUrl         = "http://localhost:8000/predict"; // Prediction Endpoint
+input string   InpServerUrl         = "http://127.0.0.1:8000/predict"; // Prediction Endpoint
 input int      InpTimeoutMs         = 3000;                            // Timeout in Milliseconds
 
 input group "--- Trading Settings ---"
@@ -110,7 +110,11 @@ int QueryPythonModel(double close, double sma, double atr, double position, int 
                               DoubleToString(position, 1));
                               
    uchar data[];
-   StringToCharArray(body, data, 0, WHOLE_ARRAY, CP_UTF8);
+   int len = StringToCharArray(body, data, 0, WHOLE_ARRAY, CP_UTF8);
+   if(len > 1)
+   {
+      ArrayResize(data, len - 1); // Remove the null-terminating character '\0'
+   }
    
    uchar result[];
    string responseHeaders = "";
@@ -191,18 +195,59 @@ void ExecuteModelAction(int action)
          double sl = (InpStopLoss > 0) ? NormalizePrice(ask - InpStopLoss * _Point) : 0.0;
          double tp = (InpTakeProfit > 0) ? NormalizePrice(ask + InpTakeProfit * _Point) : 0.0;
          
-         Print("Model Action: BUY. Opening BUY trade.");
-         if(trade.Buy(InpLotSize, _Symbol, ask, sl, tp, "RL Bridge Buy"))
+         PrintFormat("Model Action: BUY. Opening BUY trade. Lot: %.2f, SL: %.5f, TP: %.5f", InpLotSize, sl, tp);
+         
+         // Check execution mode (Market Execution does not allow SL/TP in opening request)
+         long execMode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_EXEMODE);
+         if(execMode == SYMBOL_TRADE_EXECUTION_MARKET)
          {
-            ulong code = trade.ResultRetcode();
-            if(code == TRADE_RETCODE_DONE || code == TRADE_RETCODE_PLACED)
-               lastTradeError = "";
+            Print("ECN/Market Execution mode. Sending BUY without SL/TP first.");
+            if(trade.Buy(InpLotSize, _Symbol, ask, 0.0, 0.0, "RL Bridge Buy"))
+            {
+               ulong code = trade.ResultRetcode();
+               if(code == TRADE_RETCODE_DONE || code == TRADE_RETCODE_PLACED)
+               {
+                  lastTradeError = "";
+                  Print("BUY deal executed. Adding SL/TP...");
+                  Sleep(100); // Wait for position to register in terminal database
+                  if(!trade.PositionModify(_Symbol, sl, tp))
+                  {
+                     Print("Warning: Could not modify position to set SL/TP. Code: ", trade.ResultRetcode(), " (", trade.ResultRetcodeDescription(), ")");
+                  }
+               }
+               else
+               {
+                  lastTradeError = StringFormat("BUY Failed: %s", trade.ResultRetcodeDescription());
+                  Print(lastTradeError);
+               }
+            }
             else
-               lastTradeError = StringFormat("BUY Failed: %s", trade.ResultRetcodeDescription());
+            {
+               lastTradeError = StringFormat("BUY Rejected: %s", trade.ResultRetcodeDescription());
+               Print(lastTradeError);
+            }
          }
          else
          {
-            lastTradeError = StringFormat("BUY Rejected: %s", trade.ResultRetcodeDescription());
+            // Instant / Request / Exchange execution (Stops allowed in order request)
+            if(trade.Buy(InpLotSize, _Symbol, ask, sl, tp, "RL Bridge Buy"))
+            {
+               ulong code = trade.ResultRetcode();
+               if(code == TRADE_RETCODE_DONE || code == TRADE_RETCODE_PLACED)
+               {
+                  lastTradeError = "";
+               }
+               else
+               {
+                  lastTradeError = StringFormat("BUY Failed: %s", trade.ResultRetcodeDescription());
+                  Print(lastTradeError);
+               }
+            }
+            else
+            {
+               lastTradeError = StringFormat("BUY Rejected: %s", trade.ResultRetcodeDescription());
+               Print(lastTradeError);
+            }
          }
       }
    }
@@ -221,18 +266,58 @@ void ExecuteModelAction(int action)
          double sl = (InpStopLoss > 0) ? NormalizePrice(bid + InpStopLoss * _Point) : 0.0;
          double tp = (InpTakeProfit > 0) ? NormalizePrice(bid - InpTakeProfit * _Point) : 0.0;
          
-         Print("Model Action: SELL. Opening SELL trade.");
-         if(trade.Sell(InpLotSize, _Symbol, bid, sl, tp, "RL Bridge Sell"))
+         PrintFormat("Model Action: SELL. Opening SELL trade. Lot: %.2f, SL: %.5f, TP: %.5f", InpLotSize, sl, tp);
+         
+         // Check execution mode
+         long execMode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_EXEMODE);
+         if(execMode == SYMBOL_TRADE_EXECUTION_MARKET)
          {
-            ulong code = trade.ResultRetcode();
-            if(code == TRADE_RETCODE_DONE || code == TRADE_RETCODE_PLACED)
-               lastTradeError = "";
+            Print("ECN/Market Execution mode. Sending SELL without SL/TP first.");
+            if(trade.Sell(InpLotSize, _Symbol, bid, 0.0, 0.0, "RL Bridge Sell"))
+            {
+               ulong code = trade.ResultRetcode();
+               if(code == TRADE_RETCODE_DONE || code == TRADE_RETCODE_PLACED)
+               {
+                  lastTradeError = "";
+                  Print("SELL deal executed. Adding SL/TP...");
+                  Sleep(100);
+                  if(!trade.PositionModify(_Symbol, sl, tp))
+                  {
+                     Print("Warning: Could not modify position to set SL/TP. Code: ", trade.ResultRetcode(), " (", trade.ResultRetcodeDescription(), ")");
+                  }
+               }
+               else
+               {
+                  lastTradeError = StringFormat("SELL Failed: %s", trade.ResultRetcodeDescription());
+                  Print(lastTradeError);
+               }
+            }
             else
-               lastTradeError = StringFormat("SELL Failed: %s", trade.ResultRetcodeDescription());
+            {
+               lastTradeError = StringFormat("SELL Rejected: %s", trade.ResultRetcodeDescription());
+               Print(lastTradeError);
+            }
          }
          else
          {
-            lastTradeError = StringFormat("SELL Rejected: %s", trade.ResultRetcodeDescription());
+            if(trade.Sell(InpLotSize, _Symbol, bid, sl, tp, "RL Bridge Sell"))
+            {
+               ulong code = trade.ResultRetcode();
+               if(code == TRADE_RETCODE_DONE || code == TRADE_RETCODE_PLACED)
+               {
+                  lastTradeError = "";
+               }
+               else
+               {
+                  lastTradeError = StringFormat("SELL Failed: %s", trade.ResultRetcodeDescription());
+                  Print(lastTradeError);
+               }
+            }
+            else
+            {
+               lastTradeError = StringFormat("SELL Rejected: %s", trade.ResultRetcodeDescription());
+               Print(lastTradeError);
+            }
          }
       }
    }
@@ -374,6 +459,15 @@ void OnTick()
       if(responseCode == 200)
       {
          lastReceivedAction = action;
+         
+         string actName = "NONE";
+         if(action == 0) actName = "FLAT";
+         else if(action == 1) actName = "BUY";
+         else if(action == 2) actName = "SELL";
+         
+         PrintFormat("Prediction Response Received -> Action: %d (%s) | Inputs: Close=%.5f, SMA=%.5f, ATR=%.5f, Position=%.1f", 
+                     action, actName, prevClose, prevSma, prevAtr, posStatus);
+                     
          ExecuteModelAction(action);
       }
       else

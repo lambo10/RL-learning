@@ -33,7 +33,8 @@ class RLBridgeRequestHandler(BaseHTTPRequestHandler):
             post_data = self.rfile.read(content_length)
             
             try:
-                data = json.loads(post_data.decode('utf-8'))
+                decoded_data = post_data.decode('utf-8').replace('\x00', '').strip()
+                data = json.loads(decoded_data)
                 
                 # Extract features sent by MQL5
                 close_val = float(data['close'])
@@ -72,7 +73,14 @@ class RLBridgeRequestHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps(response_data).encode('utf-8'))
                 
-                print(f"Prediction Request -> State: SMA_Ratio={sma_ratio:+.5f}, ATR_Ratio={atr_ratio:.5f}, Pos={position} | Selected Action: {action} ({action_name})")
+                print("\n" + "="*50)
+                print("   INCOMING PREDICTION REQUEST")
+                print("="*50)
+                print(f"Raw Request Payload:   {decoded_data}")
+                print(f"Computed State Ratios: SMA_Ratio={sma_ratio:+.6f}, ATR_Ratio={atr_ratio:.6f}, Position={position}")
+                print(f"DQN Model Decision:    Action {action} ({action_name})")
+                print(f"Sent Response JSON:    {json.dumps(response_data)}")
+                print("="*50 + "\n")
                 
             except Exception as e:
                 self.send_response(400)
@@ -85,9 +93,9 @@ class RLBridgeRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 def run_server(port=8000):
-    server_address = ('localhost', port)
+    server_address = ('127.0.0.1', port)
     httpd = HTTPServer(server_address, RLBridgeRequestHandler)
-    print(f"\nRL Python HTTP Bridge Server running on http://localhost:{port} ...")
+    print(f"\nRL Python HTTP Bridge Server running on http://127.0.0.1:{port} ...")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
