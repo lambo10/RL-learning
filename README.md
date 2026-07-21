@@ -42,7 +42,7 @@ The state space represents a snapshot of both the market conditions and the agen
    * **State 1 (Medium Volatility):** `InpVolThresholdLow` $\le$ Ratio $<$ `InpVolThresholdHigh`
    * **State 2 (High Volatility):** Ratio $\ge$ `InpVolThresholdHigh`
 3. **Window Size State (5 States):**
-   * The index of the current active evaluation window: `3, 5, 7, 10, or 14` trading days.
+   * The index of the current active evaluation window: `3, 5, 7, 10, or 14` units (Days or Hours depending on the input parameter `InpUseHoursInsteadOfDays`).
 
 ### The Action Space ($A$)
 The agent takes a joint action consisting of a trading decision and an architectural adjustment. There are $3 \times 3 = 9$ possible joint actions:
@@ -199,3 +199,22 @@ Since learning takes time (requiring exposure to multiple market cycles), it is 
   `C:\Users\<user>\AppData\Roaming\MetaQuotes\Terminal\Common\Files\RL_DynamicWindow_QTable_<Symbol>_<Period>_<MagicNumber>.bin`
 * **On Initialization (`OnInit`):** The EA checks if this binary file exists. If it does, it reads both arrays directly back into memory using `FileReadArray` to restore the pre-shutdown state, preserving all learned weights and sample sizes.
 * **Isolation by File Naming:** The filename includes the symbol, period, and magic number. This prevents crosstalk, ensuring that a run on `EURUSD H1` does not overwrite the rules learned on `GBPUSD D1` or another strategy running with a different magic number.
+
+---
+
+## 8. On-Chart Dashboard Visualization
+
+To facilitate real-time monitoring directly in the MetaTrader 5 Terminal without opening the logs, the EA updates an **On-Chart Text Dashboard** on every single tick. 
+
+### What is Displayed on the Chart:
+1. **Symbol, Timeframe, and Magic Number:** Confirms basic operational parameters.
+2. **Market Regime & State:**
+   - **Trend:** Shows if the current close price is above/below SMA 200 (e.g., `Bullish` or `Bearish`).
+   - **Volatility:** Displays Low, Medium, or High volatility zones along with the exact current ratio and threshold values.
+   - **Window State:** Shows the current evaluation window length in trading days.
+3. **Active Window Progress:**
+   - **Elapsed Progress:** Progress of the current evaluation window (e.g. `2 / 5 trading days`).
+   - **Performance Metrics:** Tracks profit/loss, maximum equity drawdown, and peak equity observed during this specific evaluation window.
+   - **Trade Count:** Counts how many trades have been executed during this window.
+4. **Active Rule in Use:** Shows the rule selected at the start of the current window, its estimated Q-value, and completed test cycles.
+5. **Competing Rules Table:** Lists all 9 candidate actions, their Q-values, and visit counts for the current state. The active selected rule is highlighted with an arrow (`-->`) for easy tracking!

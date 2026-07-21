@@ -19,6 +19,7 @@ input double   InpTradePenalty      = 1.0;       // Trade Execution Penalty (Rew
 input bool     InpLoadQTable        = true;      // Load Q-Table on startup
 input bool     InpSaveQTable        = true;      // Save Q-Table on shutdown
 input string   InpFileName          = "";        // Custom Q-Table Filename (blank for auto)
+input bool     InpUseHoursInsteadOfDays = false; // Use Hours instead of Days for evaluation windows
 
 input group "--- Volatility State Thresholds ---"
 input double   InpVolThresholdLow   = 0.0010;    // Low Volatility Threshold (ATR / Close)
@@ -298,6 +299,9 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   // Clear chart comment dashboard
+   Comment("");
+
    // Release indicator handles
    if(smaHandle != INVALID_HANDLE) IndicatorRelease(smaHandle);
    if(atrHandle != INVALID_HANDLE) IndicatorRelease(atrHandle);
@@ -544,12 +548,22 @@ void ExecuteAction(int actionIndex)
 void UpdatePolicy()
 {
    datetime currentTime = TimeCurrent();
-   int currentWindowDays = WindowDays[currentWindowIndex];
-   int elapsedDays = GetElapsedTradingDays(windowStartTime, currentTime);
+   int currentWindowSize = WindowDays[currentWindowIndex];
    
-   if(elapsedDays >= currentWindowDays)
+   double elapsed = 0.0;
+   if(InpUseHoursInsteadOfDays)
    {
-      Print("--- Lookback Window Expired. Elapsed trading days: ", elapsedDays, ". Running policy update. ---");
+      elapsed = (double)(currentTime - windowStartTime) / 3600.0;
+   }
+   else
+   {
+      elapsed = (double)(currentTime - windowStartTime) / 86400.0;
+   }
+   
+   if(elapsed >= currentWindowSize)
+   {
+      PrintFormat("--- Lookback Window Expired. Elapsed: %.2f %s (Target: %d). Running policy update. ---", 
+                  elapsed, (InpUseHoursInsteadOfDays ? "hours" : "days"), currentWindowSize);
       
       // 1. Calculate Reward
       double currentBalance = AccountInfoDouble(ACCOUNT_BALANCE);
@@ -647,6 +661,104 @@ void UpdatePolicy()
 }
 
 //+------------------------------------------------------------------+
+//| Update Real-Time On-Chart Dashboard                              |
+//+------------------------------------------------------------------+
+void UpdateChartComment()
+{
+   int trendState = GetTrendState();
+   int volState = GetVolatilityState();
+   int windowState = currentWindowIndex;
+   
+   // Calculate volatility ratio for display
+   double atr[];
+   double close[];
+   double ratio = 0.0;
+   if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && CopyClose(_Symbol, _Period, 0, 1, close) > 0)
+   {
+      if(close[0] > 0.0) ratio = atr[0] / close[0];
+   }
+   
+   string trendStr = (trendState == 1) ? "Bullish (Close >= SMA 200)" : "Bearish/Neutral (Close < SMA 200)";
+   string volStr = "Unknown";
+   if(volState == 0) volStr = StringFormat("Low (Ratio: %.5f < %.5f)", ratio, InpVolThresholdLow);
+   else if(volState == 1) volStr = StringFormat("Medium (%.5f <= Ratio < %.5f)", InpVolThresholdLow, InpVolThresholdHigh);
+   else if(volState == 2) volStr = StringFormat("High (Ratio: %.5f >= %.5f)", ratio, InpVolThresholdHigh);
+   
+   double elapsed = 0.0;
+   string unit = "days";
+   if(InpUseHoursInsteadOfDays)
+   {
+      elapsed = (double)(TimeCurrent() - windowStartTime) / 3600.0;
+      unit = "hours";
+   }
+   else
+   {
+      elapsed = (double)(TimeCurrent() - windowStartTime) / 86400.0;
+      unit = "days";
+   }
+   int currentWindowSize = WindowDays[currentWindowIndex];
+   
+   int tSel = lastAction / 3;
+   int wSel = lastAction % 3;
+   double currentQVal = QTable[lastTrendState][lastVolState][lastWindowState][lastAction];
+   int cyclesOfTest = VisitTable[lastTrendState][lastVolState][lastWindowState][lastAction];
+   
+   string competingRulesStr = "";
+   for(int i = 0; i < NUM_ACTIONS; i++)
+   {
+      int tAct = i / 3;
+      int wAct = i % 3;
+      string pointer = (i == lastAction && firstActionTaken) ? "--> " : "    ";
+      competingRulesStr += StringFormat("\n%sAction %d (%s, %s): Q = %s, Visits = %d", 
+                                        pointer, i, GetTradeActionName(tAct), GetWindowActionName(wAct), 
+                                        DoubleToString(QTable[trendState][volState][windowState][i], 4),
+                                        VisitTable[trendState][volState][windowState][i]);
+   }
+   
+   string text = StringFormat(
+      "===========================================================\n"+
+      "   REINFORCEMENT LEARNING ON-THE-FLY DASHBOARD\n"+
+      "===========================================================\n"+
+      "Symbol: %s (%s)  |  Magic Number: %d\n"+
+      "-----------------------------------------------------------\n"+
+      "MARKET REGIME & STATE:\n"+
+      "  - Trend: %s\n"+
+      "  - Volatility: %s\n"+
+      "  - Window State: %d (%d %s)\n"+
+      "-----------------------------------------------------------\n"+
+      "ACTIVE WINDOW TRACKING:\n"+
+      "  - Elapsed Progress: %.2f / %d %s\n"+
+      "  - Window Profit/Loss: %s %s\n"+
+      "  - Window Max Drawdown: %s %s\n"+
+      "  - Window Peak Equity: %s %s\n"+
+      "  - Window Trades Count: %d\n"+
+      "-----------------------------------------------------------\n"+
+      "ACTIVE RULE IN USE (from last state):\n"+
+      "  - Selected Action: Action %d (%s, %s)\n"+
+      "  - Rule Q-value: %s\n"+
+      "  - Completed Test Cycles: %d\n"+
+      "-----------------------------------------------------------\n"+
+      "COMPETING RULES IN CURRENT STATE:%s\n"+
+      "===========================================================",
+      _Symbol, EnumToString(_Period), InpMagicNumber,
+      trendStr,
+      volStr,
+      windowState, currentWindowSize, unit,
+      elapsed, currentWindowSize, unit,
+      DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE) - startingBalance, 2), AccountInfoString(ACCOUNT_CURRENCY),
+      DoubleToString(windowMaxDrawdown, 2), AccountInfoString(ACCOUNT_CURRENCY),
+      DoubleToString(windowPeakEquity, 2), AccountInfoString(ACCOUNT_CURRENCY),
+      tradesCountInWindow,
+      lastAction, GetTradeActionName(tSel), GetWindowActionName(wSel),
+      DoubleToString(currentQVal, 4),
+      cyclesOfTest,
+      competingRulesStr
+   );
+   
+   Comment(text);
+}
+
+//+------------------------------------------------------------------+
 //| Expert tick function                                             |
 //+------------------------------------------------------------------+
 void OnTick()
@@ -680,7 +792,7 @@ void OnTick()
       }
       else
       {
-         // Skip tick until indicator data is populated
+         Comment("RL Dynamic Window EA: Waiting for indicator buffers to load...");
          return; 
       }
    }
@@ -699,5 +811,8 @@ void OnTick()
    
    // 3. Evaluate lookback window expiration and policy updates
    UpdatePolicy();
+   
+   // 4. Update the on-chart dashboard Comment
+   UpdateChartComment();
 }
 //+------------------------------------------------------------------+
