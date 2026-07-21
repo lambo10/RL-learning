@@ -144,11 +144,58 @@ For any given state, there are 9 competing rules (actions). The agent prioritize
 
 ---
 
-## 6. Binary Persistence: Keeping the Knowledge
+## 6. Decision Transparency: Rule Selection Logs
 
-Since learning takes time (requiring exposure to multiple market cycles), it is crucial that the agent does not lose its Q-table when the terminal restarts or when a backtest ends.
+To make the learning and execution process completely transparent, the EA tracks the number of times each rule has been tested and logs the details of every decision to the MetaTrader 5 Journal.
 
-* **On Deinitialization (`OnDeinit`):** The EA serializes the entire 4D `QTable` array into a single binary file in the MetaTrader Common Files sandbox:
+### Tracking Test Cycles (The `VisitTable`)
+The EA utilizes an integer matrix `VisitTable[NUM_TREND_STATES][NUM_VOL_STATES][NUM_WINDOW_STATES][NUM_ACTIONS]` that is saved and loaded alongside the Q-Table. 
+* Every time a lookback window expires and the Bellman equation updates a state-action Q-value, the visit counter for that specific state-action pair is incremented by 1.
+* The visit count represents the **number of completed test cycles (epochs)** that the agent has run to evaluate that specific rule. Higher visit counts mean the agent's Q-value estimate for that rule is highly mature and backed by substantial historical data.
+
+### The Action Selection Report
+At the start of every new lookback window, the EA evaluates the current market conditions, compares all competing rules, makes a selection, and prints a structured **RL Action Selection Report** to the Journal.
+
+Below is an example of the report format printed to the Terminal log:
+
+```text
+=== RL ACTION SELECTION REPORT ===
+State: Trend=1, Vol=0, WindowIdx=2 (7 days)
+Selected Rule: Action 4 (BUY, HOLD)
+Estimated Rule Quality (Q-value): 42.5312
+Completed Test Cycles (Visits): 15
+Selection Reason: Exploitation (Selected the unique optimal option with Max Q = 42.5312)
+Competing Rules in State:
+  Action 0 (FLAT, DECREASE): Q = 0.0000, Visits = 0
+  Action 1 (FLAT, HOLD): Q = 0.0000, Visits = 0
+  Action 2 (FLAT, INCREASE): Q = -1.2500, Visits = 2
+  Action 3 (BUY, DECREASE): Q = 10.4500, Visits = 4
+  Action 4 (BUY, HOLD): Q = 42.5312, Visits = 15
+  Action 5 (BUY, INCREASE): Q = 35.1200, Visits = 11
+  Action 6 (SELL, DECREASE): Q = -45.2200, Visits = 8
+  Action 7 (SELL, HOLD): Q = -15.8000, Visits = 6
+  Action 8 (SELL, INCREASE): Q = -8.4500, Visits = 3
+==================================
+```
+
+### Deciphering the Log Elements
+1. **State:** The current environment condition (e.g., Trend=1 (uptrend), Vol=0 (low volatility), WindowIdx=2 (active lookback was 7 days)).
+2. **Selected Rule:** The joint action chosen for the upcoming period, showing both its numeric code and friendly name (e.g., Action 4: open/hold a BUY position and keep the lookback window at 7 days).
+3. **Estimated Rule Quality (Q-value):** The expected return/reward value for the chosen action. In this case, 42.5312 indicates a strong positive historical risk-adjusted return.
+4. **Completed Test Cycles (Visits):** How many times the agent has already tested this specific rule in this state (e.g., 15 completed windows).
+5. **Selection Reason:** Explains the math behind the selection:
+   * *Exploration:* Selected at random due to Epsilon-Greedy exploration to search for new options.
+   * *Exploitation (Unique):* Chose the unique rule that has the highest historical Q-value.
+   * *Exploitation (Tie-breaker):* Selected randomly among several equivalent rules (e.g., at the beginning when multiple rules have a Q-value of 0.0).
+6. **Competing Rules:** Lists all 9 actions available in the current state, displaying their estimated qualities and visit history. This reveals exactly which rules were passed over (e.g., SELL action 6 was rejected because it had a negative Q-value of -45.2200 over 8 test cycles, while BUY action 5 was a close runner-up with Q = 35.1200 over 11 test cycles).
+
+---
+
+## 7. Binary Persistence: Keeping the Knowledge
+
+Since learning takes time (requiring exposure to multiple market cycles), it is crucial that the agent does not lose its Q-table and visit counts when the terminal restarts or when a backtest ends.
+
+* **On Deinitialization (`OnDeinit`):** The EA serializes both the 4D `QTable` and `VisitTable` arrays into a single binary file in the MetaTrader Common Files sandbox:
   `C:\Users\<user>\AppData\Roaming\MetaQuotes\Terminal\Common\Files\RL_DynamicWindow_QTable_<Symbol>_<Period>_<MagicNumber>.bin`
-* **On Initialization (`OnInit`):** The EA checks if this binary file exists. If it does, it reads the array directly back into memory using `FileReadArray`. This restores the Q-table to its exact pre-shutdown state, preserving all learned weights.
-* **Why Symbol, Period, and Magic Number are in the filename:** This isolates the learning process for different settings. If you run the EA on `EURUSD H1` and `GBPUSD D1` simultaneously, they will maintain separate, independent binary Q-tables, ensuring that the rules learned for one symbol or timeframe do not overwrite or corrupt the rules learned for another.
+* **On Initialization (`OnInit`):** The EA checks if this binary file exists. If it does, it reads both arrays directly back into memory using `FileReadArray` to restore the pre-shutdown state, preserving all learned weights and sample sizes.
+* **Isolation by File Naming:** The filename includes the symbol, period, and magic number. This prevents crosstalk, ensuring that a run on `EURUSD H1` does not overwrite the rules learned on `GBPUSD D1` or another strategy running with a different magic number.

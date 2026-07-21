@@ -57,6 +57,7 @@ enum ENUM_WINDOW_ACTION
 
 //--- Global Variables
 double QTable[NUM_TREND_STATES][NUM_VOL_STATES][NUM_WINDOW_STATES][NUM_ACTIONS];
+int    VisitTable[NUM_TREND_STATES][NUM_VOL_STATES][NUM_WINDOW_STATES][NUM_ACTIONS];
 int    currentWindowIndex = 2; // Start with 7 days (index 2 of WindowDays)
 datetime windowStartTime;
 double   startingBalance;
@@ -220,8 +221,9 @@ string GetQTableFileName()
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   // Initialize Q-Table to zero
+   // Initialize Q-Table and Visit-Table to zero
    ArrayInitialize(QTable, 0.0);
+   ArrayInitialize(VisitTable, 0);
    
    // Set magic number and slippage on trade object
    trade.SetExpertMagicNumber(InpMagicNumber);
@@ -260,11 +262,16 @@ int OnInit()
          int fileHandle = FileOpen(fileName, FILE_READ | FILE_BIN | FILE_COMMON);
          if(fileHandle != INVALID_HANDLE)
          {
-            uint read = FileReadArray(fileHandle, QTable);
+            uint readQ = FileReadArray(fileHandle, QTable);
+            uint readV = FileReadArray(fileHandle, VisitTable);
             FileClose(fileHandle);
-            if(read > 0)
+            if(readQ > 0 && readV > 0)
             {
-               Print("Successfully loaded Q-Table from common files: ", fileName);
+               Print("Successfully loaded Q-Table and Visit-Table from common files: ", fileName);
+            }
+            else if(readQ > 0)
+            {
+               Print("Successfully loaded Q-Table from common files (Visit-Table was empty or could not be loaded): ", fileName);
             }
             else
             {
@@ -302,11 +309,12 @@ void OnDeinit(const int reason)
       int fileHandle = FileOpen(fileName, FILE_WRITE | FILE_BIN | FILE_COMMON);
       if(fileHandle != INVALID_HANDLE)
       {
-         uint written = FileWriteArray(fileHandle, QTable);
+         uint writtenQ = FileWriteArray(fileHandle, QTable);
+         uint writtenV = FileWriteArray(fileHandle, VisitTable);
          FileClose(fileHandle);
-         if(written > 0)
+         if(writtenQ > 0 && writtenV > 0)
          {
-            Print("Successfully saved Q-Table to common files: ", fileName);
+            Print("Successfully saved Q-Table and Visit-Table to common files: ", fileName);
          }
          else
          {
@@ -321,57 +329,111 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
+//| Get Trade Action Name for logging                                |
+//+------------------------------------------------------------------+
+string GetTradeActionName(int action)
+{
+   if(action == ACTION_FLAT) return "FLAT";
+   if(action == ACTION_BUY)  return "BUY";
+   if(action == ACTION_SELL) return "SELL";
+   return "UNKNOWN";
+}
+
+//+------------------------------------------------------------------+
+//| Get Window Action Name for logging                               |
+//+------------------------------------------------------------------+
+string GetWindowActionName(int action)
+{
+   if(action == WINDOW_DECREASE) return "DECREASE";
+   if(action == WINDOW_HOLD)     return "HOLD";
+   if(action == WINDOW_INCREASE) return "INCREASE";
+   return "UNKNOWN";
+}
+
+//+------------------------------------------------------------------+
 //| Select Action using Epsilon-Greedy Strategy with tie breaking    |
 //+------------------------------------------------------------------+
 int SelectAction(int trendState, int volState, int windowState)
 {
-   // Exploration
-   double randVal = (double)MathRand() / 32767.0;
-   if(randVal < InpEpsilon)
-   {
-      int action = MathRand() % NUM_ACTIONS;
-      Print("Exploration: Selected random action ", action);
-      return action;
-   }
-   
-   // Exploitation
-   int bestAction = 0;
-   double maxValue = QTable[trendState][volState][windowState][0];
-   
-   // Track tied actions for random tie-breaking
-   int bestActions[NUM_ACTIONS];
-   int count = 0;
-   
+   string competingRulesStr = "";
    for(int i = 0; i < NUM_ACTIONS; i++)
    {
-      double val = QTable[trendState][volState][windowState][i];
-      if(val > maxValue)
-      {
-         maxValue = val;
-         bestAction = i;
-         count = 0;
-         bestActions[count] = i;
-         count++;
-      }
-      else if(val == maxValue)
-      {
-         bestActions[count] = i;
-         count++;
-      }
+      int tAct = i / 3;
+      int wAct = i % 3;
+      competingRulesStr += StringFormat("\n  Action %d (%s, %s): Q = %s, Visits = %d", 
+                                        i, GetTradeActionName(tAct), GetWindowActionName(wAct), 
+                                        DoubleToString(QTable[trendState][volState][windowState][i], 4),
+                                        VisitTable[trendState][volState][windowState][i]);
    }
+
+   double randVal = (double)MathRand() / 32767.0;
+   int selectedAction = 0;
+   string reason = "";
    
-   // If multiple actions have the same maximal Q-value, select randomly among them
-   if(count > 1)
+   if(randVal < InpEpsilon)
    {
-      bestAction = bestActions[MathRand() % count];
-      Print("Exploitation: Tie-breaker selected action ", bestAction, " (out of ", count, " equal options) with Q-value = ", maxValue);
+      selectedAction = MathRand() % NUM_ACTIONS;
+      reason = StringFormat("Exploration (Epsilon-Greedy random search, rand: %.4f < %.2f)", randVal, InpEpsilon);
    }
    else
    {
-      Print("Exploitation: Selected best action ", bestAction, " with Q-value = ", maxValue);
+      double maxValue = QTable[trendState][volState][windowState][0];
+      int bestActions[NUM_ACTIONS];
+      int count = 0;
+      
+      for(int i = 0; i < NUM_ACTIONS; i++)
+      {
+         double val = QTable[trendState][volState][windowState][i];
+         if(val > maxValue)
+         {
+            maxValue = val;
+            count = 0;
+            bestActions[count] = i;
+            count++;
+         }
+         else if(val == maxValue)
+         {
+            bestActions[count] = i;
+            count++;
+         }
+      }
+      
+      if(count > 1)
+      {
+         int idx = MathRand() % count;
+         selectedAction = bestActions[idx];
+         reason = StringFormat("Exploitation (Tie-breaker randomly selected action out of %d equivalent options with Max Q = %s)", 
+                               count, DoubleToString(maxValue, 4));
+      }
+      else
+      {
+         selectedAction = bestActions[0];
+         reason = StringFormat("Exploitation (Selected the unique optimal option with Max Q = %s)", 
+                               DoubleToString(maxValue, 4));
+      }
    }
    
-   return bestAction;
+   int tSel = selectedAction / 3;
+   int wSel = selectedAction % 3;
+   int cyclesOfTest = VisitTable[trendState][volState][windowState][selectedAction];
+   double currentQVal = QTable[trendState][volState][windowState][selectedAction];
+   
+   PrintFormat("=== RL ACTION SELECTION REPORT ===\n"+
+               "State: Trend=%d, Vol=%d, WindowIdx=%d (%d days)\n"+
+               "Selected Rule: Action %d (%s, %s)\n"+
+               "Estimated Rule Quality (Q-value): %s\n"+
+               "Completed Test Cycles (Visits): %d\n"+
+               "Selection Reason: %s\n"+
+               "Competing Rules in State:%s\n"+
+               "==================================",
+               trendState, volState, windowState, WindowDays[windowState],
+               selectedAction, GetTradeActionName(tSel), GetWindowActionName(wSel),
+               DoubleToString(currentQVal, 4),
+               cyclesOfTest,
+               reason,
+               competingRulesStr);
+               
+   return selectedAction;
 }
 
 //+------------------------------------------------------------------+
@@ -542,8 +604,13 @@ void UpdatePolicy()
       QTable[lastTrendState][lastVolState][lastWindowState][lastAction] += InpAlpha * (reward + InpGamma * maxNextQ - oldQ);
       double newQ = QTable[lastTrendState][lastVolState][lastWindowState][lastAction];
       
-      Print("Bellman Update: QTable[Trend:", lastTrendState, "][Vol:", lastVolState, "][WindowIdx:", lastWindowState, "][Action:", lastAction, 
-            "] updated from ", DoubleToString(oldQ, 4), " to ", DoubleToString(newQ, 4));
+      // Increment visit counter (completed test cycles) for this state-action pair
+      VisitTable[lastTrendState][lastVolState][lastWindowState][lastAction]++;
+      
+      PrintFormat("Bellman Update: QTable[Trend:%d][Vol:%d][WindowIdx:%d][Action:%d] (Visit Count: %d) updated from %s to %s", 
+                  lastTrendState, lastVolState, lastWindowState, lastAction, 
+                  VisitTable[lastTrendState][lastVolState][lastWindowState][lastAction], 
+                  DoubleToString(oldQ, 4), DoubleToString(newQ, 4));
 
       // 5. Select next joint action
       int nextAction = SelectAction(nextTrendState, nextVolState, nextWindowState);
@@ -564,7 +631,7 @@ void UpdatePolicy()
       windowMaxDrawdown = 0.0;
       tradesCountInWindow = 0;
       
-      // 9. Save Q-Table to file to secure learning progress (highly useful during live trading or backtesting)
+      // 9. Save Q-Table and Visit-Table to file to secure learning progress
       if(InpSaveQTable)
       {
          string fileName = GetQTableFileName();
@@ -572,6 +639,7 @@ void UpdatePolicy()
          if(fileHandle != INVALID_HANDLE)
          {
             FileWriteArray(fileHandle, QTable);
+            FileWriteArray(fileHandle, VisitTable);
             FileClose(fileHandle);
          }
       }
