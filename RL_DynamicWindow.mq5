@@ -19,7 +19,14 @@ input double   InpTradePenalty      = 1.0;       // Trade Execution Penalty (Rew
 input bool     InpLoadQTable        = true;      // Load Q-Table on startup
 input bool     InpSaveQTable        = true;      // Save Q-Table on shutdown
 input string   InpFileName          = "";        // Custom Q-Table Filename (blank for auto)
-input bool     InpUseHoursInsteadOfDays = false; // Use Hours instead of Days for evaluation windows
+enum ENUM_WINDOW_UNIT
+{
+   UNIT_BARS = 0,  // Bars of the current chart timeframe
+   UNIT_HOURS = 1, // Calendar Hours
+   UNIT_DAYS = 2   // Calendar Days
+};
+
+input ENUM_WINDOW_UNIT InpWindowUnit = UNIT_BARS; // Evaluation Window Unit
 
 input group "--- Volatility State Thresholds ---"
 input double   InpVolThresholdLow   = 0.0010;    // Low Volatility Threshold (ATR / Close)
@@ -38,8 +45,15 @@ input int      InpSlippage          = 3;         // Allowed Slippage in Points
 #define NUM_WINDOW_STATES 5
 #define NUM_ACTIONS       9
 
-//--- Window Size Options (Days)
-const int WindowDays[NUM_WINDOW_STATES] = {3, 5, 7, 10, 14};
+//--- Window Size Options (discretized sizes for BARS, HOURS, DAYS)
+// BARS: 50, 100, 200, 500, 1000 bars
+// HOURS: 3, 6, 12, 24, 48 hours
+// DAYS: 3, 5, 7, 10, 14 days
+const int WindowSizes[3][NUM_WINDOW_STATES] = {
+   {50, 100, 200, 500, 1000}, // UNIT_BARS
+   {3, 6, 12, 24, 48},        // UNIT_HOURS
+   {3, 5, 7, 10, 14}          // UNIT_DAYS
+};
 
 //--- Action Mapping Enums
 enum ENUM_TRADE_ACTION 
@@ -59,7 +73,9 @@ enum ENUM_WINDOW_ACTION
 //--- Global Variables
 double QTable[NUM_TREND_STATES][NUM_VOL_STATES][NUM_WINDOW_STATES][NUM_ACTIONS];
 int    VisitTable[NUM_TREND_STATES][NUM_VOL_STATES][NUM_WINDOW_STATES][NUM_ACTIONS];
-int    currentWindowIndex = 2; // Start with 7 days (index 2 of WindowDays)
+int    currentWindowIndex = 2; // Start with index 2
+datetime windowStartBarTime;
+string   lastTradeError = "";
 datetime windowStartTime;
 double   startingBalance;
 double   windowPeakEquity;
@@ -215,6 +231,19 @@ string GetQTableFileName()
 {
    if(InpFileName != "") return InpFileName;
    return "RL_DynamicWindow_QTable_" + _Symbol + "_" + EnumToString(_Period) + "_" + string(InpMagicNumber) + ".bin";
+}
+
+//+------------------------------------------------------------------+
+//| Get the open time of the current bar                             |
+//+------------------------------------------------------------------+
+datetime GetCurrentBarTime()
+{
+   datetime times[];
+   if(CopyTime(_Symbol, _Period, 0, 1, times) > 0)
+   {
+      return times[0];
+   }
+   return TimeCurrent();
 }
 
 //+------------------------------------------------------------------+
@@ -422,15 +451,16 @@ int SelectAction(int trendState, int volState, int windowState)
    int cyclesOfTest = VisitTable[trendState][volState][windowState][selectedAction];
    double currentQVal = QTable[trendState][volState][windowState][selectedAction];
    
+   string unitName = (InpWindowUnit == UNIT_BARS) ? "bars" : ((InpWindowUnit == UNIT_HOURS) ? "hours" : "days");
    PrintFormat("=== RL ACTION SELECTION REPORT ===\n"+
-               "State: Trend=%d, Vol=%d, WindowIdx=%d (%d days)\n"+
+               "State: Trend=%d, Vol=%d, WindowIdx=%d (%d %s)\n"+
                "Selected Rule: Action %d (%s, %s)\n"+
                "Estimated Rule Quality (Q-value): %s\n"+
                "Completed Test Cycles (Visits): %d\n"+
                "Selection Reason: %s\n"+
                "Competing Rules in State:%s\n"+
                "==================================",
-               trendState, volState, windowState, WindowDays[windowState],
+               trendState, volState, windowState, WindowSizes[InpWindowUnit][windowState], unitName,
                selectedAction, GetTradeActionName(tSel), GetWindowActionName(wSel),
                DoubleToString(currentQVal, 4),
                cyclesOfTest,
@@ -473,11 +503,22 @@ void ExecuteTradeAction(int tradeAct)
          Print("Action: BUY. Opening BUY position. Lot: ", InpLotSize, ", SL: ", sl, ", TP: ", tp);
          if(trade.Buy(InpLotSize, _Symbol, ask, sl, tp, "RL Buy"))
          {
-            tradesCountInWindow++;
+            ulong code = trade.ResultRetcode();
+            if(code == TRADE_RETCODE_DONE || code == TRADE_RETCODE_PLACED)
+            {
+               tradesCountInWindow++;
+               lastTradeError = "";
+            }
+            else
+            {
+               lastTradeError = StringFormat("BUY Failed: %s", trade.ResultRetcodeDescription());
+               Print(lastTradeError);
+            }
          }
          else
          {
-            Print("Failed to execute BUY. Code: ", trade.ResultRetcode(), ", Description: ", trade.ResultRetcodeDescription());
+            lastTradeError = StringFormat("BUY Rejected: %s", trade.ResultRetcodeDescription());
+            Print(lastTradeError);
          }
       }
       else
@@ -503,11 +544,22 @@ void ExecuteTradeAction(int tradeAct)
          Print("Action: SELL. Opening SELL position. Lot: ", InpLotSize, ", SL: ", sl, ", TP: ", tp);
          if(trade.Sell(InpLotSize, _Symbol, bid, sl, tp, "RL Sell"))
          {
-            tradesCountInWindow++;
+            ulong code = trade.ResultRetcode();
+            if(code == TRADE_RETCODE_DONE || code == TRADE_RETCODE_PLACED)
+            {
+               tradesCountInWindow++;
+               lastTradeError = "";
+            }
+            else
+            {
+               lastTradeError = StringFormat("SELL Failed: %s", trade.ResultRetcodeDescription());
+               Print(lastTradeError);
+            }
          }
          else
          {
-            Print("Failed to execute SELL. Code: ", trade.ResultRetcode(), ", Description: ", trade.ResultRetcodeDescription());
+            lastTradeError = StringFormat("SELL Rejected: %s", trade.ResultRetcodeDescription());
+            Print(lastTradeError);
          }
       }
       else
@@ -526,7 +578,7 @@ void ExecuteAction(int actionIndex)
    int windowAct = actionIndex % 3;
 
    // 1. Execute Window Meta-Action
-   int oldWindowDays = WindowDays[currentWindowIndex];
+   int oldWindowSize = WindowSizes[InpWindowUnit][currentWindowIndex];
    if(windowAct == WINDOW_DECREASE)
    {
       currentWindowIndex = MathMax(0, currentWindowIndex - 1);
@@ -536,7 +588,9 @@ void ExecuteAction(int actionIndex)
       currentWindowIndex = MathMin(NUM_WINDOW_STATES - 1, currentWindowIndex + 1);
    }
    
-   Print("Window Meta-Action: Code ", windowAct, ". Resized window from ", oldWindowDays, " to ", WindowDays[currentWindowIndex], " trading days.");
+   string unitName = (InpWindowUnit == UNIT_BARS) ? "bars" : ((InpWindowUnit == UNIT_HOURS) ? "hours" : "days");
+   PrintFormat("Window Meta-Action: Code %d. Resized window from %d to %d %s.", 
+               windowAct, oldWindowSize, WindowSizes[InpWindowUnit][currentWindowIndex], unitName);
 
    // 2. Execute Trading Action
    ExecuteTradeAction(tradeAct);
@@ -548,22 +602,27 @@ void ExecuteAction(int actionIndex)
 void UpdatePolicy()
 {
    datetime currentTime = TimeCurrent();
-   int currentWindowSize = WindowDays[currentWindowIndex];
+   int currentWindowSize = WindowSizes[InpWindowUnit][currentWindowIndex];
    
    double elapsed = 0.0;
-   if(InpUseHoursInsteadOfDays)
+   if(InpWindowUnit == UNIT_BARS)
+   {
+      elapsed = (double)iBarShift(_Symbol, _Period, windowStartBarTime, false);
+   }
+   else if(InpWindowUnit == UNIT_HOURS)
    {
       elapsed = (double)(currentTime - windowStartTime) / 3600.0;
    }
-   else
+   else if(InpWindowUnit == UNIT_DAYS)
    {
       elapsed = (double)(currentTime - windowStartTime) / 86400.0;
    }
    
    if(elapsed >= currentWindowSize)
    {
+      string unitName = (InpWindowUnit == UNIT_BARS) ? "bars" : ((InpWindowUnit == UNIT_HOURS) ? "hours" : "days");
       PrintFormat("--- Lookback Window Expired. Elapsed: %.2f %s (Target: %d). Running policy update. ---", 
-                  elapsed, (InpUseHoursInsteadOfDays ? "hours" : "days"), currentWindowSize);
+                  elapsed, unitName, currentWindowSize);
       
       // 1. Calculate Reward
       double currentBalance = AccountInfoDouble(ACCOUNT_BALANCE);
@@ -640,6 +699,7 @@ void UpdatePolicy()
       
       // 8. Reset window performance tracking variables
       windowStartTime = currentTime;
+      windowStartBarTime = GetCurrentBarTime();
       startingBalance = currentBalance;
       windowPeakEquity = AccountInfoDouble(ACCOUNT_EQUITY);
       windowMaxDrawdown = 0.0;
@@ -727,18 +787,23 @@ void UpdateChartComment()
    else if(volState == 2) volStr = StringFormat("High (Ratio: %.5f >= %.5f)", ratio, InpVolThresholdHigh);
    
    double elapsed = 0.0;
-   string unit = "days";
-   if(InpUseHoursInsteadOfDays)
+   string unitStr = "days";
+   if(InpWindowUnit == UNIT_BARS)
+   {
+      elapsed = (double)iBarShift(_Symbol, _Period, windowStartBarTime, false);
+      unitStr = "bars";
+   }
+   else if(InpWindowUnit == UNIT_HOURS)
    {
       elapsed = (double)(TimeCurrent() - windowStartTime) / 3600.0;
-      unit = "hours";
+      unitStr = "hours";
    }
-   else
+   else if(InpWindowUnit == UNIT_DAYS)
    {
       elapsed = (double)(TimeCurrent() - windowStartTime) / 86400.0;
-      unit = "days";
+      unitStr = "days";
    }
-   int currentWindowSize = WindowDays[currentWindowIndex];
+   int currentWindowSize = WindowSizes[InpWindowUnit][currentWindowIndex];
    
    int tSel = lastAction / 3;
    int wSel = lastAction % 3;
@@ -769,11 +834,6 @@ void UpdateChartComment()
    }
    
    string text = StringFormat(
-      "===========================================================\n"+
-      "   REINFORCEMENT LEARNING ON-THE-FLY DASHBOARD\n"+
-      "===========================================================\n"+
-      "Symbol: %s (%s)  |  Magic Number: %d\n"+
-      "-----------------------------------------------------------\n"+
       "MARKET REGIME & STATE:\n"+
       "  - Trend: %s\n"+
       "  - Volatility: %s\n"+
@@ -784,7 +844,7 @@ void UpdateChartComment()
       "  - Window Profit/Loss: %s %s\n"+
       "  - Window Max Drawdown: %s %s\n"+
       "  - Window Peak Equity: %s %s\n"+
-      "  - Window Trades Count: %d\n"+
+      "  - Window Trades Count: %d%s\n"+
       "-----------------------------------------------------------\n"+
       "ACTIVE RULE IN USE (from last state):\n"+
       "  - Selected Action: Action %d (%s, %s)\n"+
@@ -796,12 +856,12 @@ void UpdateChartComment()
       _Symbol, EnumToString(_Period), InpMagicNumber,
       trendStr,
       volStr,
-      windowState, currentWindowSize, unit,
-      elapsed, currentWindowSize, unit,
+      windowState, currentWindowSize, unitStr,
+      elapsed, currentWindowSize, unitStr,
       DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE) - startingBalance, 2), AccountInfoString(ACCOUNT_CURRENCY),
       DoubleToString(windowMaxDrawdown, 2), AccountInfoString(ACCOUNT_CURRENCY),
       DoubleToString(windowPeakEquity, 2), AccountInfoString(ACCOUNT_CURRENCY),
-      tradesCountInWindow,
+      tradesCountInWindow, (lastTradeError != "" ? "\n  - [WARNING] Last Order Error: " + lastTradeError : ""),
       lastAction, GetTradeActionName(tSel), GetWindowActionName(wSel),
       DoubleToString(currentQVal, 4),
       cyclesOfTest,
@@ -834,14 +894,16 @@ void OnTick()
          lastAction = firstAction;
          
          windowStartTime = TimeCurrent();
+         windowStartBarTime = GetCurrentBarTime();
          startingBalance = AccountInfoDouble(ACCOUNT_BALANCE);
          windowPeakEquity = AccountInfoDouble(ACCOUNT_EQUITY);
          windowMaxDrawdown = 0.0;
          tradesCountInWindow = 0;
          
          firstActionTaken = true;
+         string unitStr = (InpWindowUnit == UNIT_BARS) ? "bars" : ((InpWindowUnit == UNIT_HOURS) ? "hours" : "days");
          Print("RL Agent Initialized. Initial State: Trend = ", trend, ", Vol = ", vol, ", Window State = ", windowState, 
-               " (", WindowDays[windowState], " days). Initial Action = ", firstAction);
+               " (", WindowSizes[InpWindowUnit][windowState], " ", unitStr, "). Initial Action = ", firstAction);
       }
       else
       {

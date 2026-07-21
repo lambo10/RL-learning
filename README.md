@@ -25,7 +25,7 @@ The agent operates in a closed-loop system where it maps environment states to a
 ```mermaid
 graph TD
     S[Market State: Trend + Volatility + Window] -->|Select Action| A[Joint Action: Trade + Resize Window]
-    A -->|Wait Window Days| E[Environment Transition]
+    A -->|Wait Window Size| E[Environment Transition]
     E -->|Observe Reward: Profit / DD| R[Bellman Update]
     R -->|Update Q-Table| S
 ```
