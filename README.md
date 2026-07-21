@@ -217,4 +217,10 @@ To facilitate real-time monitoring directly in the MetaTrader 5 Terminal without
    - **Performance Metrics:** Tracks profit/loss, maximum equity drawdown, and peak equity observed during this specific evaluation window.
    - **Trade Count:** Counts how many trades have been executed during this window.
 4. **Active Rule in Use:** Shows the rule selected at the start of the current window, its estimated Q-value, and completed test cycles.
-5. **Competing Rules Table:** Lists all 9 candidate actions, their Q-values, and visit counts for the current state. The active selected rule is highlighted with an arrow (`-->`) for easy tracking!
+5. **Competing Rules Table (The Rule Learning Visual Chart):** 
+   - Displays all 9 candidate rules available in the current state in a structured, aligned grid.
+   - For each rule, it prints its exact Q-value, visit history, and a **visual dual-sided bar chart** showing how the rule is evolving.
+   - The bar chart scales dynamically relative to the maximum absolute Q-value in the current state.
+   - **Positive Q-values** (profitable rules) extend to the right of the center axis `|` using solid blocks: `[          |██████    ]`.
+   - **Negative Q-values** (unprofitable/high drawdown rules) extend to the left of the center axis `|` using shaded blocks: `[    ░░░░░░|          ]`.
+   - **Active Selection Pointer:** The currently active rule is marked with a pointing arrow (`-->`) so you can watch the agent select and shift between rules in real-time.

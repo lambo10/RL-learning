@@ -661,6 +661,48 @@ void UpdatePolicy()
 }
 
 //+------------------------------------------------------------------+
+//| Generate an ASCII dual-sided bar representing Q-value magnitude  |
+//+------------------------------------------------------------------+
+string GetQBarString(double qVal, double maxAbsQ)
+{
+   int maxBlocks = 10; // Number of blocks on each side of the center line
+   string left = "";
+   string right = "";
+   
+   if(maxAbsQ <= 0.0001)
+   {
+      for(int i = 0; i < maxBlocks; i++) { left += " "; right += " "; }
+      return StringFormat("[%s|%s]", left, right);
+   }
+   
+   double prop = qVal / maxAbsQ;
+   int blocks = (int)MathRound(MathAbs(prop) * maxBlocks);
+   if(blocks > maxBlocks) blocks = maxBlocks;
+   
+   if(qVal < 0.0)
+   {
+      // Negative Q-value: draw shaded blocks on the left of '|'
+      for(int i = 0; i < maxBlocks - blocks; i++) left += " ";
+      for(int i = 0; i < blocks; i++) left += "░";
+      for(int i = 0; i < maxBlocks; i++) right += " ";
+   }
+   else if(qVal > 0.0)
+   {
+      // Positive Q-value: draw solid blocks on the right of '|'
+      for(int i = 0; i < maxBlocks; i++) left += " ";
+      for(int i = 0; i < blocks; i++) right += "█";
+      for(int i = 0; i < maxBlocks - blocks; i++) right += " ";
+   }
+   else
+   {
+      // Zero Q-value
+      for(int i = 0; i < maxBlocks; i++) { left += " "; right += " "; }
+   }
+   
+   return StringFormat("[%s|%s]", left, right);
+}
+
+//+------------------------------------------------------------------+
 //| Update Real-Time On-Chart Dashboard                              |
 //+------------------------------------------------------------------+
 void UpdateChartComment()
@@ -703,16 +745,27 @@ void UpdateChartComment()
    double currentQVal = QTable[lastTrendState][lastVolState][lastWindowState][lastAction];
    int cyclesOfTest = VisitTable[lastTrendState][lastVolState][lastWindowState][lastAction];
    
+   // Find maximum absolute Q-value in the current state to scale the bar chart
+   double maxAbsQ = 0.0001;
+   for(int i = 0; i < NUM_ACTIONS; i++)
+   {
+      double absQ = MathAbs(QTable[trendState][volState][windowState][i]);
+      if(absQ > maxAbsQ) maxAbsQ = absQ;
+   }
+   
    string competingRulesStr = "";
    for(int i = 0; i < NUM_ACTIONS; i++)
    {
       int tAct = i / 3;
       int wAct = i % 3;
+      double qVal = QTable[trendState][volState][windowState][i];
+      int visits = VisitTable[trendState][volState][windowState][i];
+      string barStr = GetQBarString(qVal, maxAbsQ);
       string pointer = (i == lastAction && firstActionTaken) ? "--> " : "    ";
-      competingRulesStr += StringFormat("\n%sAction %d (%s, %s): Q = %s, Visits = %d", 
+      
+      competingRulesStr += StringFormat("\n%sAction %d (%-4s, %-8s) : Q=%+7.4f %s (Visits: %d)", 
                                         pointer, i, GetTradeActionName(tAct), GetWindowActionName(wAct), 
-                                        DoubleToString(QTable[trendState][volState][windowState][i], 4),
-                                        VisitTable[trendState][volState][windowState][i]);
+                                        qVal, barStr, visits);
    }
    
    string text = StringFormat(
@@ -738,7 +791,7 @@ void UpdateChartComment()
       "  - Rule Q-value: %s\n"+
       "  - Completed Test Cycles: %d\n"+
       "-----------------------------------------------------------\n"+
-      "COMPETING RULES IN CURRENT STATE:%s\n"+
+      "COMPETING RULES IN CURRENT STATE (Negative [░░|  ] Positive [  |██]):%s\n"+
       "===========================================================",
       _Symbol, EnumToString(_Period), InpMagicNumber,
       trendStr,
